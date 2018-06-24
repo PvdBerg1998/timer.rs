@@ -2,13 +2,13 @@
 //! a given time or after a given delay.
 
 use std::cmp::Ordering;
-use std::thread;
-use std::time::{Duration, SystemTime};
+use std::collections::BinaryHeap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::{Arc, Mutex, Condvar};
 use std::sync::mpsc::{channel, Sender};
-use std::collections::BinaryHeap;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 /// An item scheduled for delayed execution.
 struct Schedule<T> {
@@ -16,28 +16,30 @@ struct Schedule<T> {
     date: SystemTime,
 
     /// The schedule data.
-    data : T,
+    data: T,
 
     /// A mechanism to cancel execution of an item.
     guard: Guard,
 
     /// If `Some(d)`, the item must be repeated every interval of
     /// length `d`, until cancelled.
-    repeat: Option<Duration>
+    repeat: Option<Duration>,
 }
-impl <T> Ord for Schedule<T> {
+
+impl<T> Ord for Schedule<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.date.cmp(&other.date).reverse()
     }
 }
-impl <T> PartialOrd for Schedule<T> {
+
+impl<T> PartialOrd for Schedule<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.date.partial_cmp(&other.date).map(|ord| ord.reverse())
     }
 }
-impl <T> Eq for Schedule<T> {
-}
-impl <T> PartialEq for Schedule<T> {
+
+impl<T> Eq for Schedule<T> {}
+impl<T> PartialEq for Schedule<T> {
     fn eq(&self, other: &Self) -> bool {
         self.date.eq(&other.date)
     }
@@ -47,20 +49,20 @@ impl <T> PartialEq for Schedule<T> {
 enum Op<T> {
     /// Schedule a new item for execution.
     Schedule(Schedule<T>),
-
     /// Stop the thread.
-    Stop
+    Stop,
 }
 
 /// A mutex-based kind-of-channel used to communicate between the
-/// Communication thread and the Scheuler thread.
+/// Communication thread and the Scheduler thread.
 struct WaiterChannel<T> {
     /// Pending messages.
     messages: Mutex<Vec<Op<T>>>,
     /// A condition variable used for waiting.
     condvar: Condvar,
 }
-impl <T> WaiterChannel<T> {
+
+impl<T> WaiterChannel<T> {
     fn with_capacity(cap: usize) -> Self {
         WaiterChannel {
             messages: Mutex::new(Vec::with_capacity(cap)),
@@ -90,9 +92,9 @@ trait Executor<T> {
     //   data
     // }
 
-    fn execute(&mut self, data : T);
+    fn execute(&mut self, data: T);
 
-    fn execute_clone(&mut self, data : T) -> T;
+    fn execute_clone(&mut self, data: T) -> T;
 }
 
 /// An executor implementation for executing callbacks on the scheduler
@@ -100,11 +102,11 @@ trait Executor<T> {
 struct CallbackExecutor;
 
 impl Executor<Box<FnMut() + Send>> for CallbackExecutor {
-    fn execute(&mut self, mut data : Box<FnMut() + Send>) {
+    fn execute(&mut self, mut data: Box<FnMut() + Send>) {
         data();
     }
 
-    fn execute_clone(&mut self, mut data : Box<FnMut() + Send>) -> Box<FnMut() + Send> {
+    fn execute_clone(&mut self, mut data: Box<FnMut() + Send>) -> Box<FnMut() + Send> {
         data();
         data
     }
@@ -112,35 +114,44 @@ impl Executor<Box<FnMut() + Send>> for CallbackExecutor {
 
 /// An executor implementation for delivering messages to a channel.
 struct DeliveryExecutor<T>
-    where T : 'static + Send {
+where
+    T: 'static + Send,
+{
     /// The channel to deliver messages to.
-    tx : Sender<T>
+    tx: Sender<T>,
 }
 
-impl <T> Executor<T> for DeliveryExecutor<T>
-    where T : 'static + Send + Clone {
-    fn execute(&mut self, data : T) {
+impl<T> Executor<T> for DeliveryExecutor<T>
+where
+    T: 'static + Send + Clone,
+{
+    fn execute(&mut self, data: T) {
         let _ = self.tx.send(data);
     }
 
-    fn execute_clone(&mut self, data : T) -> T {
+    fn execute_clone(&mut self, data: T) -> T {
         let _ = self.tx.send(data.clone());
         data
     }
 }
 
-
-struct Scheduler<T,E> where E : Executor<T> {
+struct Scheduler<T, E>
+where
+    E: Executor<T>,
+{
     waiter: Arc<WaiterChannel<T>>,
     heap: BinaryHeap<Schedule<T>>,
-    executor: E
+    executor: E,
 }
 
-impl <T,E> Scheduler<T,E> where E : Executor<T> {
-    fn with_capacity(waiter: Arc<WaiterChannel<T>>, executor : E, capacity: usize) -> Self {
+impl<T, E> Scheduler<T, E>
+where
+    E: Executor<T>,
+{
+    fn with_capacity(waiter: Arc<WaiterChannel<T>>, executor: E, capacity: usize) -> Self {
         Scheduler {
-            waiter: waiter,
-            executor: executor,
+            waiter,
+            executor,
             heap: BinaryHeap::with_capacity(capacity),
         }
     }
@@ -149,7 +160,7 @@ impl <T,E> Scheduler<T,E> where E : Executor<T> {
         enum Sleep {
             NotAtAll,
             UntilAwakened,
-            AtMost(Duration)
+            AtMost(Duration),
         }
 
         let ref waiter = *self.waiter;
@@ -200,9 +211,9 @@ impl <T,E> Scheduler<T,E> where E : Executor<T> {
                     sleep = Sleep::NotAtAll;
                     self.heap.push(Schedule {
                         date: sched.date + delta,
-                        data: data,
+                        data,
                         guard: sched.guard,
-                        repeat: Some(delta)
+                        repeat: Some(delta),
                     });
                 } else {
                     self.executor.execute(sched.data);
@@ -212,10 +223,10 @@ impl <T,E> Scheduler<T,E> where E : Executor<T> {
             match sleep {
                 Sleep::UntilAwakened => {
                     let _ = waiter.condvar.wait(lock);
-                },
+                }
                 Sleep::AtMost(delay) => {
                     let _ = waiter.condvar.wait_timeout(lock, delay);
-                },
+                }
                 Sleep::NotAtAll => {}
             }
         }
@@ -224,35 +235,45 @@ impl <T,E> Scheduler<T,E> where E : Executor<T> {
 
 /// Shared coordination logic for timer threads.
 pub struct TimerBase<T>
-    where T : 'static + Send {
+where
+    T: 'static + Send,
+{
     /// Sender used to communicate with the _Communication_ thread. In
-    /// turn, this thread will send 
+    /// turn, this thread will send
     tx: Sender<Op<T>>,
 }
 
-impl <T> Drop for TimerBase<T>
-    where T : 'static + Send {
+impl<T> Drop for TimerBase<T>
+where
+    T: 'static + Send,
+{
     /// Stop the timer threads.
     fn drop(&mut self) {
         self.tx.send(Op::Stop).unwrap();
     }
 }
 
-impl <T> TimerBase<T>
-    where T : 'static + Send {
+impl<T> TimerBase<T>
+where
+    T: 'static + Send,
+{
     /// Create a timer base.
     ///
-    /// This immediatey launches two threads, which will remain
+    /// This immediately launches two threads, which will remain
     /// launched until the timer is dropped. As expected, the threads
     /// spend most of their life waiting for instructions.
-    fn new<E>(executor : E) -> Self
-        where E : 'static + Executor<T> + Send {
+    fn new<E>(executor: E) -> Self
+    where
+        E: 'static + Executor<T> + Send,
+    {
         Self::with_capacity(executor, 32)
     }
 
-    /// As `new()`, but with a manually specified initial capaicty.
-    fn with_capacity<E>(executor : E, capacity: usize) -> Self
-        where E : 'static + Executor<T> + Send {
+    /// As `new()`, but with a manually specified initial capacity.
+    fn with_capacity<E>(executor: E, capacity: usize) -> Self
+    where
+        E: 'static + Executor<T> + Send,
+    {
         let waiter_send = Arc::new(WaiterChannel::with_capacity(capacity));
         let waiter_recv = waiter_send.clone();
 
@@ -281,35 +302,38 @@ impl <T> TimerBase<T>
         });
 
         // Spawn a second thread, in charge of scheduling.
-        thread::Builder::new().name("Timer thread".to_owned()).spawn(move || {
-            let mut scheduler = Scheduler::with_capacity(waiter_recv, executor, capacity);
-            scheduler.run()
-        }).unwrap();
-        TimerBase {
-            tx: tx
-        }
+        thread::Builder::new()
+            .name("Timer thread".to_owned())
+            .spawn(move || {
+                let mut scheduler = Scheduler::with_capacity(waiter_recv, executor, capacity);
+                scheduler.run()
+            })
+            .unwrap();
+        TimerBase { tx }
     }
 
-    pub fn schedule_with_delay(&self, delay: Duration, data : T) -> Guard {
+    pub fn schedule_with_delay(&self, delay: Duration, data: T) -> Guard {
         self.schedule_with_date(SystemTime::now() + delay, data)
     }
 
-    pub fn schedule_with_date(&self, date: SystemTime, data : T) -> Guard {
+    pub fn schedule_with_date(&self, date: SystemTime, data: T) -> Guard {
         self.schedule(date, None, data)
     }
 
-    pub fn schedule_repeating(&self, repeat: Duration, data : T) -> Guard {
+    pub fn schedule_repeating(&self, repeat: Duration, data: T) -> Guard {
         self.schedule(SystemTime::now() + repeat, Some(repeat), data)
     }
 
-    pub fn schedule(&self, date: SystemTime, repeat: Option<Duration>, data : T) -> Guard {
+    pub fn schedule(&self, date: SystemTime, repeat: Option<Duration>, data: T) -> Guard {
         let guard = Guard::new();
-        self.tx.send(Op::Schedule(Schedule {
-            date: date,
-            data: data,
-            guard: guard.clone(),
-            repeat: repeat
-        })).unwrap();
+        self.tx
+            .send(Op::Schedule(Schedule {
+                date,
+                data,
+                guard: guard.clone(),
+                repeat,
+            }))
+            .unwrap();
         guard
     }
 }
@@ -323,22 +347,26 @@ impl <T> TimerBase<T>
 /// _Scheduler_ thread (which requires acquiring a possibly-long-held
 /// Mutex) without blocking the caller thread.
 pub struct Timer {
-    base: TimerBase<Box<FnMut() + Send>>
+    base: TimerBase<Box<FnMut() + Send>>,
 }
 
 impl Timer {
     /// Create a timer.
     ///
-    /// This immediatey launches two threads, which will remain
+    /// This immediately launches two threads, which will remain
     /// launched until the timer is dropped. As expected, the threads
     /// spend most of their life waiting for instructions.
     pub fn new() -> Self {
-        Timer { base : TimerBase::new(CallbackExecutor) }
+        Timer {
+            base: TimerBase::new(CallbackExecutor),
+        }
     }
 
-    /// As `new()`, but with a manually specified initial capaicty.
+    /// As `new()`, but with a manually specified initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        Timer { base : TimerBase::with_capacity(CallbackExecutor, capacity) }
+        Timer {
+            base: TimerBase::with_capacity(CallbackExecutor, capacity),
+        }
     }
 
     /// Schedule a callback for execution after a delay.
@@ -386,7 +414,9 @@ impl Timer {
     /// println!("This code has been executed after 3 seconds");
     /// ```
     pub fn schedule_with_delay<F>(&self, delay: Duration, cb: F) -> Guard
-        where F: 'static + FnMut() + Send {
+    where
+        F: 'static + FnMut() + Send,
+    {
         self.base.schedule_with_delay(delay, Box::new(cb))
     }
 
@@ -415,7 +445,8 @@ impl Timer {
     /// contaminate the Timer and the calling thread itself. You have
     /// been warned.
     pub fn schedule_with_date<F>(&self, date: SystemTime, cb: F) -> Guard
-        where F: 'static + FnMut() + Send
+    where
+        F: 'static + FnMut() + Send,
     {
         self.base.schedule_with_date(date, Box::new(cb))
     }
@@ -479,7 +510,8 @@ impl Timer {
     /// assert_eq!(count_start, count_stop);
     /// ```
     pub fn schedule_repeating<F>(&self, repeat: Duration, cb: F) -> Guard
-        where F: 'static + FnMut() + Send
+    where
+        F: 'static + FnMut() + Send,
     {
         self.base.schedule_repeating(repeat, Box::new(cb))
     }
@@ -508,7 +540,8 @@ impl Timer {
     /// contaminate the Timer and the calling thread itself. You have
     /// been warned.
     pub fn schedule<F>(&self, date: SystemTime, repeat: Option<Duration>, cb: F) -> Guard
-        where F: 'static + FnMut() + Send
+    where
+        F: 'static + FnMut() + Send,
     {
         self.base.schedule(date, repeat, Box::new(cb))
     }
@@ -518,7 +551,7 @@ impl Timer {
 ///
 /// In the current implementation, each timer is executed as two
 /// threads. The _Scheduler_ thread is in charge of maintaining the
-/// queue of messages to deliver and of actually deliverying them. The
+/// queue of messages to deliver and of actually delivering them. The
 /// _Communication_ thread is in charge of communicating with the
 /// _Scheduler_ thread (which requires acquiring a possibly-long-held
 /// Mutex) without blocking the caller thread.
@@ -530,27 +563,31 @@ impl Timer {
 /// passed directly. Second, MessageTimer avoids the dynamic dispatch
 /// overhead associated with invoking the closure functions.
 pub struct MessageTimer<T>
-    where T : 'static + Send + Clone {
-    base: TimerBase<T>
+where
+    T: 'static + Send + Clone,
+{
+    base: TimerBase<T>,
 }
 
-impl <T> MessageTimer<T>
-    where T : 'static + Send + Clone {
+impl<T> MessageTimer<T>
+where
+    T: 'static + Send + Clone,
+{
     /// Create a message timer.
     ///
-    /// This immediatey launches two threads, which will remain
+    /// This immediately launches two threads, which will remain
     /// launched until the timer is dropped. As expected, the threads
     /// spend most of their life waiting for instructions.
     pub fn new(tx: Sender<T>) -> Self {
         MessageTimer {
-            base : TimerBase::new(DeliveryExecutor { tx : tx })
+            base: TimerBase::new(DeliveryExecutor { tx }),
         }
     }
 
-    /// As `new()`, but with a manually specified initial capaicty.
+    /// As `new()`, but with a manually specified initial capacity.
     pub fn with_capacity(tx: Sender<T>, capacity: usize) -> Self {
         MessageTimer {
-            base : TimerBase::with_capacity(DeliveryExecutor { tx : tx }, capacity)
+            base: TimerBase::with_capacity(DeliveryExecutor { tx }, capacity),
         }
     }
 
@@ -581,7 +618,7 @@ impl <T> MessageTimer<T>
     /// rx.recv().unwrap();
     /// println!("This code has been executed after 3 seconds");
     /// ```
-    pub fn schedule_with_delay(&self, delay: Duration, msg : T) -> Guard {
+    pub fn schedule_with_delay(&self, delay: Duration, msg: T) -> Guard {
         self.base.schedule_with_delay(delay, msg)
     }
 
@@ -597,7 +634,7 @@ impl <T> MessageTimer<T>
     /// This method returns a `Guard` object. If that `Guard` is
     /// dropped, delivery is cancelled.
     ///
-    pub fn schedule_with_date(&self, date: SystemTime, msg : T) -> Guard {
+    pub fn schedule_with_date(&self, date: SystemTime, msg: T) -> Guard {
         self.base.schedule_with_date(date, msg)
     }
 
@@ -643,8 +680,7 @@ impl <T> MessageTimer<T>
     ///   count += 1;
     /// }
     /// ```
-    pub fn schedule_repeating(&self, repeat: Duration, msg : T) -> Guard
-    {
+    pub fn schedule_repeating(&self, repeat: Duration, msg: T) -> Guard {
         self.base.schedule_repeating(repeat, msg)
     }
 
@@ -670,7 +706,7 @@ impl <T> MessageTimer<T>
     /// Any failure in cloning of messages will occur on the scheduler thread
     /// and will contaminate the Timer and the calling thread itself. You have
     /// been warned.
-    pub fn schedule(&self, date: SystemTime, repeat: Option<Duration>, msg : T) -> Guard {
+    pub fn schedule(&self, date: SystemTime, repeat: Option<Duration>, msg: T) -> Guard {
         self.base.schedule(date, repeat, msg)
     }
 }
@@ -680,13 +716,14 @@ impl <T> MessageTimer<T>
 #[derive(Clone)]
 pub struct Guard {
     should_execute: Arc<AtomicBool>,
-    ignore_drop: bool
+    ignore_drop: bool,
 }
+
 impl Guard {
     fn new() -> Self {
         Guard {
             should_execute: Arc::new(AtomicBool::new(true)),
-            ignore_drop: false
+            ignore_drop: false,
         }
     }
     fn should_execute(&self) -> bool {
@@ -700,6 +737,7 @@ impl Guard {
         self.ignore_drop = true;
     }
 }
+
 impl Drop for Guard {
     /// Cancel a schedule.
     fn drop(&mut self) {
@@ -742,7 +780,13 @@ mod tests {
             let elapsed = SystemTime::now().duration_since(start).unwrap().as_secs();
             println!("Received message {} after {} seconds", msg, elapsed);
             assert_eq!(msg, delays[i]);
-            assert!(delays[i] <= elapsed && elapsed <= delays[i] + 3, "We have waited {} seconds, expecting [{}, {}]", elapsed, delays[i], delays[i] + 3);
+            assert!(
+                delays[i] <= elapsed && elapsed <= delays[i] + 3,
+                "We have waited {} seconds, expecting [{}, {}]",
+                elapsed,
+                delays[i],
+                delays[i] + 3
+            );
         }
 
         // Now make sure that callbacks that are designed to be executed
@@ -767,9 +811,11 @@ mod tests {
         let timer = MessageTimer::new(tx);
         let start = SystemTime::now();
 
-        let mut delays = vec!(400, 300, 100, 500, 200);
+        let mut delays = vec![400, 300, 100, 500, 200];
         for delay in delays.clone() {
-            timer.schedule_with_delay(Duration::from_millis(delay), delay).ignore();
+            timer
+                .schedule_with_delay(Duration::from_millis(delay), delay)
+                .ignore();
         }
 
         delays.sort();
@@ -803,9 +849,11 @@ mod tests {
 
         {
             let called = called.clone();
-            timer.schedule_with_delay(Duration::from_millis(1), move || {
-                *called.lock().unwrap() = true;
-            }).ignore();
+            timer
+                .schedule_with_delay(Duration::from_millis(1), move || {
+                    *called.lock().unwrap() = true;
+                })
+                .ignore();
         }
 
         thread::sleep(std::time::Duration::new(1, 0));
@@ -826,11 +874,15 @@ mod tests {
         // the message instances are not cloned.
         let (tx, rx) = channel();
         let timer = MessageTimer::new(tx);
-        timer.schedule_with_delay(Duration::from_millis(0), NoCloneMessage).ignore();
-        timer.schedule_with_delay(Duration::from_millis(0), NoCloneMessage).ignore();
-        
+        timer
+            .schedule_with_delay(Duration::from_millis(0), NoCloneMessage)
+            .ignore();
+        timer
+            .schedule_with_delay(Duration::from_millis(0), NoCloneMessage)
+            .ignore();
+
         for _ in 0..2 {
-            let _  = rx.recv();
+            let _ = rx.recv();
         }
     }
 }
